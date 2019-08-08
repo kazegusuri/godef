@@ -1229,11 +1229,11 @@ func (p *parser) checkExpr(x ast.Expr) ast.Expr {
 	case *ast.CallExpr:
 	case *ast.StarExpr:
 	case *ast.UnaryExpr:
-		if t.Op == token.RANGE {
-			// the range operator is only allowed at the top of a for statement
-			p.errorExpected(x.Pos(), "expression")
-			x = &ast.BadExpr{x.Pos(), x.End()}
-		}
+		// if t.Op == token.RANGE {
+		// 	// the range operator is only allowed at the top of a for statement
+		// 	p.errorExpected(x.Pos(), "expression")
+		// 	x = &ast.BadExpr{x.Pos(), x.End()}
+		// }
 	case *ast.BinaryExpr:
 	default:
 		// all other nodes are not proper expressions
@@ -1366,6 +1366,7 @@ func (p *parser) parseUnaryExpr() ast.Expr {
 		}
 
 		x := p.parseUnaryExpr()
+
 		return &ast.UnaryExpr{pos, token.ARROW, p.checkExpr(x)}
 
 	case token.MUL:
@@ -1390,7 +1391,9 @@ func (p *parser) parseBinaryExpr(prec1 int) ast.Expr {
 			pos, op := p.pos, p.tok
 			p.next()
 			y := p.parseBinaryExpr(prec + 1)
-			x = &ast.BinaryExpr{p.checkExpr(x), pos, op, p.checkExpr(y)}
+			xx := p.checkExpr(x)
+			yy := p.checkExpr(y)
+			x = &ast.BinaryExpr{xx, pos, op, yy}
 		}
 	}
 
@@ -1872,11 +1875,18 @@ func (p *parser) parseForStmt() ast.Stmt {
 			p.errorExpected(as.Rhs[0].Pos(), "1 expression")
 			return &ast.BadStmt{pos, body.End()}
 		}
+
 		if rhs, isUnary := as.Rhs[0].(*ast.UnaryExpr); isUnary && rhs.Op == token.RANGE {
 			// rhs is range expression
 			// (any short variable declaration was handled by parseSimpleStat above)
 			return &ast.RangeStmt{pos, key, value, as.TokPos, as.Tok, rhs.X, body}
 		}
+
+		// for _, _ := range a + b
+		if rhs, ok := as.Rhs[0].(*ast.BinaryExpr); ok {
+			return &ast.RangeStmt{pos, key, value, as.TokPos, as.Tok, rhs.Y, body}
+		}
+
 		p.errorExpected(s2.Pos(), "range clause")
 		return &ast.BadStmt{pos, body.End()}
 	}
