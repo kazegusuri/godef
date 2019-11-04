@@ -22,11 +22,11 @@ func godefPackages(cfg *packages.Config, filename string, src []byte, searchpos 
 			filename: src,
 		}
 	}
-	cfg.Mode = packages.LoadAllSyntax
+	cfg.Mode = packages.LoadTypes | packages.NeedSyntax | packages.NeedTypesInfo | packages.NeedDeps
 	cfg.ParseFile = parser
 	lpkgs, err := packages.Load(cfg, "file="+filename)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("package load error %v", err)
 	}
 	if len(lpkgs) < 1 {
 		return nil, nil, fmt.Errorf("There must be at least one package that contains the file")
