@@ -24,6 +24,8 @@ import (
 
 	"golang.org/x/tools/go/expect"
 	"golang.org/x/tools/go/packages"
+	"golang.org/x/tools/internal/span"
+	"golang.org/x/tools/internal/testenv"
 )
 
 var (
@@ -39,6 +41,11 @@ type Module struct {
 	// be a string or byte slice, in which case it is the contents of the
 	// file, otherwise it must be a Writer function.
 	Files map[string]interface{}
+
+	// Overlay is the set of source file overlays for the module.
+	// The keys are the file fragment as in the Files configuration.
+	// The values are the in memory overlay content for the file.
+	Overlay map[string][]byte
 }
 
 // A Writer is a function that writes out a test file.
@@ -53,13 +60,16 @@ type Exported struct {
 	// Exactly what it will contain varies depending on the Exporter being used.
 	Config *packages.Config
 
-	temp     string                       // the temporary directory that was exported to
-	primary  string                       // the first non GOROOT module that was exported
-	written  map[string]map[string]string // the full set of exported files
-	fset     *token.FileSet               // The file set used when parsing expectations
-	notes    []*expect.Note               // The list of expectations extracted from go source files
-	markers  map[string]Range             // The set of markers extracted from go source files
-	contents map[string][]byte
+	// Modules is the module description that was used to produce this exported data set.
+	Modules []Module
+
+	ExpectFileSet *token.FileSet // The file set used when parsing expectations
+
+	temp    string                       // the temporary directory that was exported to
+	primary string                       // the first non GOROOT module that was exported
+	written map[string]map[string]string // the full set of exported files
+	notes   []*expect.Note               // The list of expectations extracted from go source files
+	markers map[string]span.Range        // The set of markers extracted from go source files
 }
 
 // Exporter implementations are responsible for converting from the generic description of some
@@ -118,6 +128,10 @@ func BenchmarkAll(b *testing.B, f func(*testing.B, Exporter)) {
 // debugging tests.
 func Export(t testing.TB, exporter Exporter, modules []Module) *Exported {
 	t.Helper()
+	if exporter == Modules {
+		testenv.NeedsTool(t, "go")
+	}
+
 	dirname := strings.Replace(t.Name(), "/", "_", -1)
 	dirname = strings.Replace(dirname, "#", "_", -1) // duplicate subtests get a #NNN suffix.
 	temp, err := ioutil.TempDir("", dirname)
@@ -126,14 +140,17 @@ func Export(t testing.TB, exporter Exporter, modules []Module) *Exported {
 	}
 	exported := &Exported{
 		Config: &packages.Config{
-			Dir: temp,
-			Env: append(os.Environ(), "GOPACKAGESDRIVER=off"),
+			Dir:     temp,
+			Env:     append(os.Environ(), "GOPACKAGESDRIVER=off", "GOROOT="), // Clear GOROOT to work around #32849.
+			Overlay: make(map[string][]byte),
+			Tests:   true,
+			Mode:    packages.LoadImports,
 		},
-		temp:     temp,
-		primary:  modules[0].Name,
-		written:  map[string]map[string]string{},
-		fset:     token.NewFileSet(),
-		contents: map[string][]byte{},
+		Modules:       modules,
+		temp:          temp,
+		primary:       modules[0].Name,
+		written:       map[string]map[string]string{},
+		ExpectFileSet: token.NewFileSet(),
 	}
 	defer func() {
 		if t.Failed() || t.Skipped() {
@@ -165,10 +182,15 @@ func Export(t testing.TB, exporter Exporter, modules []Module) *Exported {
 				t.Fatalf("Invalid type %T in files, must be string or Writer", value)
 			}
 		}
+		for fragment, value := range module.Overlay {
+			fullpath := exporter.Filename(exported, module.Name, filepath.FromSlash(fragment))
+			exported.Config.Overlay[fullpath] = value
+		}
 	}
 	if err := exporter.Finalize(exported); err != nil {
 		t.Fatal(err)
 	}
+	testenv.NeedsGoPackagesEnv(t, exported.Config.Env)
 	return exported
 }
 
@@ -218,7 +240,7 @@ func Copy(source string) Writer {
 		if !stat.Mode().IsRegular() {
 			// cannot copy non-regular files (e.g., directories,
 			// symlinks, devices, etc.)
-			return fmt.Errorf("Cannot copy non regular file %s", source)
+			return fmt.Errorf("cannot copy non regular file %s", source)
 		}
 		contents, err := ioutil.ReadFile(source)
 		if err != nil {
@@ -247,7 +269,7 @@ func MustCopyFileTree(root string) map[string]interface{} {
 		if err != nil {
 			return err
 		}
-		result[fragment] = Copy(path)
+		result[filepath.ToSlash(fragment)] = Copy(path)
 		return nil
 	}); err != nil {
 		log.Panic(fmt.Sprintf("MustCopyFileTree failed: %v", err))
@@ -265,6 +287,16 @@ func (e *Exported) Cleanup() {
 		log.Printf("Skipping cleanup of temp dir: %s", e.temp)
 		return
 	}
+	// Make everything read-write so that the Module exporter's module cache can be deleted.
+	filepath.Walk(e.temp, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			os.Chmod(path, 0777)
+		}
+		return nil
+	})
 	os.RemoveAll(e.temp) // ignore errors
 	e.temp = ""
 }
@@ -282,8 +314,11 @@ func (e *Exported) File(module, fragment string) string {
 	return ""
 }
 
-func (e *Exported) fileContents(filename string) ([]byte, error) {
-	if content, found := e.contents[filename]; found {
+// FileContents returns the contents of the specified file.
+// It will use the overlay if the file is present, otherwise it will read it
+// from disk.
+func (e *Exported) FileContents(filename string) ([]byte, error) {
+	if content, found := e.Config.Overlay[filename]; found {
 		return content, nil
 	}
 	content, err := ioutil.ReadFile(filename)

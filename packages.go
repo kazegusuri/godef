@@ -22,7 +22,7 @@ func godefPackages(cfg *packages.Config, filename string, src []byte, searchpos 
 			filename: src,
 		}
 	}
-	cfg.Mode = packages.LoadSyntax
+	cfg.Mode = packages.LoadAllSyntax
 	cfg.ParseFile = parser
 	lpkgs, err := packages.Load(cfg, "file="+filename)
 	if err != nil {
